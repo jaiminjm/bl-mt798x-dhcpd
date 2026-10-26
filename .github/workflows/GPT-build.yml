@@ -28,7 +28,8 @@ jobs:
       - name: Prepare build environment
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq jq make gcc
+          # 这里补上了 python2，因为底层的 generate_gpt.sh 依赖它
+          sudo apt-get install -y -qq jq make gcc python2
 
       - name: Modify JSON configuration
         run: |
@@ -37,7 +38,6 @@ jobs:
           PROD_SIZE="${{ github.event.inputs.PROD_SIZE }}"
           echo "Checking $TARGET_JSON"
           
-          # 使用 jq 工具直接修改 JSON，彻底告别 Python 缩进报错
           jq --arg size "$PROD_SIZE" '
             .partitions |= map(
               if .name == "production" then .size = $size
