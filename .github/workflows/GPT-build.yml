@@ -28,6 +28,16 @@ on:
         required: false
         default: false
         type: boolean
+      TARGET_MODEL:
+        description: '要修改的机型 JSON 文件名 (不带 .json，例如 cmcc_rax3000m-emmc)'
+        required: true
+        default: 'cmcc_rax3000m-emmc'
+        type: string
+      PROD_SIZE:
+        description: 'production 分区大小 (例如 8G, 4G)'
+        required: true
+        default: '8G'
+        type: string
       pub_release:
         description: 'Publish to GitHub Release'
         required: false
@@ -40,7 +50,6 @@ env:
   TZ: Asia/Shanghai
   UPLOAD_ARTIFACT: true
   UPLOAD_RELEASE: true
-  # Build configuration from inputs
   CONFIG_GPT_TEMPLATE: ${{ github.event.inputs.GPT_TEMPLATE || 'false' }}
 
 jobs:
@@ -56,7 +65,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo -E apt-get -qq update
-          sudo -E apt-get -qq install git rename python2.7 python2.7-dev python3
+          sudo -E apt-get -qq install git rename python2.7 python2.7-dev python3 python3-pip
           sudo timedatectl set-timezone "$TZ"
           sudo mkdir -p /workdir
           sudo chown $USER:$GROUPS /workdir
@@ -78,24 +87,14 @@ jobs:
           set -euo pipefail
           cd bl-mt798x-dhcpd
 
-          # Generate .config for GPT build
           echo "# CONFIG_BUILD_FIP is not set" > .config
           echo "# CONFIG_BUILD_ATF is not set" >> .config
           echo "CONFIG_BUILD_GPT=y" >> .config
-
-          # SILENT and BUILD_LOG defaults
           echo "CONFIG_SILENT=y" >> .config
           echo "CONFIG_BUILD_LOG=y" >> .config
-
-          # Run defconfig to fill in missing values
           make defconfig 2>&1 || true
 
-          # Show final .config
-          echo "=== Generated .config ==="
-          cat .config
-          echo "========================="
-
-      - name: Prepare GPT inputs
+      - name: Prepare GPT inputs and Modify JSON
         shell: bash
         run: |
           set -euo pipefail
@@ -113,6 +112,40 @@ jobs:
             echo "Template partition table not enabled (GPT_TEMPLATE=false)"
           fi
 
+          # ========== 核心修改：自动修改 JSON 中的分区配置 ==========
+          TARGET_JSON="mt798x_gpt/${{ github.event.inputs.TARGET_MODEL }}.json"
+          if [ -f "$TARGET_JSON" ]; then
+            echo "正在修改 $TARGET_JSON 中的分区配置..."
+            python3 -c "
+import json
+import sys
+try:
+    with open('$TARGET_JSON', 'r') as f:
+        data = json.load(f)
+    
+    for part in data.get('partitions', []):
+        # 1. 扩大 production 分区
+        if part.get('name') == 'production':
+            part['size'] = '${{ github.event.inputs.PROD_SIZE }}'
+            print('已修改 production 分区大小为 ${{ github.event.inputs.PROD_SIZE }}')
+        
+        # 2. 修复 ubootenv 名字，加上横杠
+        if part.get('name') == 'ubootenv':
+            part['name'] = 'u-boot-env'
+            print('已修正 ubootenv 为 u-boot-env')
+
+    with open('$TARGET_JSON', 'w') as f:
+        json.dump(data, f, indent=4)
+    print('JSON 修改成功！')
+except Exception as e:
+    print(f'修改 JSON 失败: {e}')
+    sys.exit(1)
+"
+          else
+            echo "警告: 找不到文件 $TARGET_JSON，将使用默认配置。"
+          fi
+          # ==========================================================
+
       - name: Build GPT
         id: gpt
         shell: bash
@@ -120,7 +153,6 @@ jobs:
           set -euo pipefail
           cd bl-mt798x-dhcpd
           chmod +x ./generate_gpt.sh
-          # Use make build target
           make build 2>&1
           echo "FILE_DATE=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
@@ -135,7 +167,6 @@ jobs:
 
           TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
 
-          # Try to timestamp output_gpt files
           if [ -d "output_gpt" ]; then
             rename "s/(.*)\.(.*)/\$1_${TIMESTAMP}.\$2/" output_gpt/* || true
           fi
@@ -145,7 +176,6 @@ jobs:
             cp -r output_gpt/* upload/ || true
           fi
 
-          # Also try to archive the entire mt798x_gpt directory if it exists, for users who want to see the full layout
           if [ -d "mt798x_gpt" ]; then
             tar -czf upload/mt798x_gpt_${TIMESTAMP}.tar.gz mt798x_gpt || true
           fi
@@ -167,17 +197,17 @@ jobs:
         run: |
           set -euo pipefail
           touch release.txt
-
           echo "- Commit: ${{ github.sha }}" >> release.txt
           echo "- Source repo: ${{ env.REPO_URL }}" >> release.txt
           echo "- Branch: ${{ env.REPO_BRANCH }}" >> release.txt
+          echo "- Target Model: ${{ github.event.inputs.TARGET_MODEL }}" >> release.txt
+          echo "- Production Size: ${{ github.event.inputs.PROD_SIZE }}" >> release.txt
           if [ "$CONFIG_GPT_TEMPLATE" = "true" ]; then
             echo "- Template partition table: Enabled" >> release.txt
           else
             echo "- Template partition table: Disabled" >> release.txt
           fi
           echo "- Build time: ${{ env.FILE_DATE }}" >> release.txt
-
           echo "" >> release.txt
           echo "---" >> release.txt
           echo "" >> release.txt
